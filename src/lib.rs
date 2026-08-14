@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod lint;
+mod picker;
 mod project;
 mod tmux;
 mod update;
@@ -49,6 +50,10 @@ fn run_cli(cli: Cli) -> Result<ExitCode> {
                 Some(Command::Ls) => list(&config),
                 Some(Command::Check { name }) => check(&config, &name),
                 Some(Command::Lint { name }) => lint(&config, name.as_deref()),
+                Some(Command::Picker) => picker::run_picker(&config),
+                Some(Command::SaveCurrent) => picker::run_save_current(&config),
+                Some(Command::Close) => picker::run_close(&config),
+                Some(Command::Open { name }) => picker::run_open(&config, &name),
                 Some(Command::Snapshot | Command::Update) => unreachable!("handled above"),
             }
         }

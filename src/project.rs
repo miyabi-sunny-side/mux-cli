@@ -7,12 +7,12 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ProjectDocument {
     pub(crate) project: Project,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Project {
     pub(crate) name: String,
@@ -24,7 +24,7 @@ pub(crate) struct Project {
     pub(crate) windows: Vec<Window>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Window {
     pub(crate) name: String,

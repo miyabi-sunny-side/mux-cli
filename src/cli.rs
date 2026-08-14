@@ -11,6 +11,10 @@ use clap::{Parser, Subcommand};
 #[command(
     version,
     about = "Select, validate, and launch tmux projects",
+    long_about = "With no command, mux lists saved projects in fzf and launches the selection.\n\
+                  Use mux picker for the unified saved-and-live list intended for tmux display-popup.",
+    after_help = "With no command, mux lists saved projects in fzf and launches the selection.\n\
+                  mux picker lists saved projects and live sessions (● live / ○ stopped) for tmux display-popup.",
     args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
@@ -44,11 +48,26 @@ pub enum Command {
     Lint { name: Option<String> },
     /// Update mux from the latest GitHub Release.
     Update,
+    /// List saved projects and live sessions, then focus, restore, or close them.
+    ///
+    /// Intended to run from `tmux display-popup`. Requires fzf.
+    /// Live sessions are marked ● and stopped saved projects are marked ○.
+    /// Names starting with `_` are hidden. Rows are sorted in C locale order.
+    /// Enter focuses a live session or restores a stopped project and exits.
+    /// Space toggles (close confirm if live, restore without focus if stopped) and stays in the list.
+    /// Esc exits.
+    Picker,
+    /// Snapshot the current tmux session and overwrite its normalized project file.
+    SaveCurrent,
+    /// Close the current tmux session without deleting its saved project file.
+    Close,
+    /// Launch or switch to a saved project without fzf.
+    Open { name: String },
 }
 
-pub fn select_with_fzf(names: &[String]) -> Result<Option<String>> {
+pub(crate) fn run_fzf(args: &[&str], lines: &[String]) -> Result<Option<String>> {
     let mut child = ProcessCommand::new("fzf")
-        .args(["--prompt", "mux> ", "--height", "40%", "--reverse"])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -56,15 +75,27 @@ pub fn select_with_fzf(names: &[String]) -> Result<Option<String>> {
         .context("fzf is required for interactive project selection")?;
     {
         let mut stdin = child.stdin.take().context("cannot open fzf stdin")?;
-        for name in names {
-            writeln!(stdin, "{name}")?;
+        for line in lines {
+            writeln!(stdin, "{line}")?;
         }
     }
     let output = child.wait_with_output().context("cannot wait for fzf")?;
     if !output.status.success() {
         return Ok(None);
     }
-    let selected = String::from_utf8(output.stdout).context("fzf returned non-UTF-8 output")?;
+    String::from_utf8(output.stdout)
+        .context("fzf returned non-UTF-8 output")
+        .map(Some)
+}
+
+pub fn select_with_fzf(names: &[String]) -> Result<Option<String>> {
+    let Some(selected) = run_fzf(
+        ["--prompt", "mux> ", "--height", "40%", "--reverse"].as_slice(),
+        names,
+    )?
+    else {
+        return Ok(None);
+    };
     let selected = selected.trim_end_matches(['\r', '\n']);
     if selected.is_empty() {
         return Ok(None);
@@ -98,5 +129,30 @@ mod tests {
         assert!(Cli::try_parse_from(["mux", "check", "demo", "-t", "work"]).is_err());
         assert!(Cli::try_parse_from(["mux", "-c", "/tmp", "ls"]).is_err());
         assert!(Cli::try_parse_from(["mux", "ls", "-c", "/tmp"]).is_err());
+        assert!(Cli::try_parse_from(["mux", "-t", "work", "open", "demo"]).is_err());
+    }
+
+    #[test]
+    fn lifecycle_commands_parse_without_launcher_overrides() {
+        assert!(matches!(
+            Cli::try_parse_from(["mux", "picker"]).unwrap().command,
+            Some(Command::Picker)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["mux", "save-current"])
+                .unwrap()
+                .command,
+            Some(Command::SaveCurrent)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["mux", "close"]).unwrap().command,
+            Some(Command::Close)
+        ));
+        let open = Cli::try_parse_from(["mux", "open", "demo"]).unwrap();
+        assert!(matches!(
+            open.command,
+            Some(Command::Open { name }) if name == "demo"
+        ));
+        assert!(Cli::try_parse_from(["mux", "open"]).is_err());
     }
 }

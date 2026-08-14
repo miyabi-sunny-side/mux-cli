@@ -10,6 +10,14 @@ use crate::{
 pub(crate) struct Snapshot {
     pub(crate) document: ProjectDocument,
     pub(crate) warnings: Vec<String>,
+    pub(crate) raw_session_name: String,
+    pub(crate) project_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SessionRef {
+    pub(crate) id: String,
+    pub(crate) raw_name: String,
 }
 
 pub(crate) fn snapshot() -> Result<Snapshot> {
@@ -17,26 +25,82 @@ pub(crate) fn snapshot() -> Result<Snapshot> {
     if pane.is_empty() {
         bail!("mux snapshot must be run inside tmux");
     }
-    Tmux::default().snapshot(&pane)
+    let snapshot = snapshot_target(&pane)?;
+    if snapshot.project_name.is_none() {
+        bail!(
+            "tmux session name {:?} cannot be converted to a meaningful mux project name; rename the session",
+            snapshot.raw_session_name
+        );
+    }
+    Ok(snapshot)
+}
+
+pub(crate) fn snapshot_target(target: &str) -> Result<Snapshot> {
+    Tmux::default().snapshot(target)
 }
 
 pub(crate) fn open(project: &Project) -> Result<()> {
+    ensure_session(project)?;
+    focus(&project.name)
+}
+
+pub(crate) fn ensure_session(project: &Project) -> Result<()> {
     let client = Tmux::default();
     if !client.has_session(&project.name)? {
         client.create_session(project)?;
     }
+    Ok(())
+}
+
+pub(crate) fn focus(name: &str) -> Result<()> {
+    let client = Tmux::default();
     match client_action(env::var_os("TMUX").is_some()) {
         ClientAction::Switch => client.run_interactive([
             OsString::from("switch-client"),
             OsString::from("-t"),
-            OsString::from(format!("={}", project.name)),
+            OsString::from(format!("={name}")),
         ]),
         ClientAction::Attach => client.run_interactive([
             OsString::from("attach-session"),
             OsString::from("-t"),
-            OsString::from(format!("={}", project.name)),
+            OsString::from(format!("={name}")),
         ]),
     }
+}
+
+pub(crate) fn list_sessions() -> Result<Vec<String>> {
+    Tmux::default().list_sessions()
+}
+
+pub(crate) fn kill_session(target: &str) -> Result<()> {
+    Tmux::default().run_checked([
+        OsString::from("kill-session"),
+        OsString::from("-t"),
+        OsString::from(target),
+    ])
+}
+
+pub(crate) fn current_session() -> Result<SessionRef> {
+    let pane = env::var("TMUX_PANE").context("mux close must be run inside tmux")?;
+    if pane.is_empty() {
+        bail!("mux close must be run inside tmux");
+    }
+    session_from_target(&pane)
+}
+
+pub(crate) fn session_by_name(name: &str) -> Result<SessionRef> {
+    session_from_target(&format!("={name}"))
+}
+
+fn session_from_target(target: &str) -> Result<SessionRef> {
+    let client = Tmux::default();
+    let id = client.display_value(target, "#{session_id}")?;
+    let raw_name = client.display_value(&id, "#{session_name}")?;
+    Ok(SessionRef { id, raw_name })
+}
+
+pub(crate) fn try_normalize_project_name(name: &str) -> Option<String> {
+    normalize_project_name(name).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,9 +127,12 @@ impl Tmux {
     fn snapshot(&self, pane_target: &str) -> Result<Snapshot> {
         let session_id = self.display_value(pane_target, "#{session_id}")?;
         let raw_session_name = self.display_value(&session_id, "#{session_name}")?;
-        let project_name = normalize_project_name(&raw_session_name)?;
+        let project_name = normalize_project_name(&raw_session_name).ok();
+        let toml_name = project_name.clone().unwrap_or_else(|| "session".to_owned());
         let mut warnings = Vec::new();
-        if project_name != raw_session_name {
+        if let Some(project_name) = &project_name
+            && project_name != &raw_session_name
+        {
             warnings.push(format!(
                 "session name {raw_session_name:?} was normalized to {project_name:?}"
             ));
@@ -110,13 +177,39 @@ impl Tmux {
         let root = project_root.context("tmux session has no windows")?;
         let startup_window = startup_window.context("tmux session has no active window")?;
         let document = ProjectDocument::from_project(Project {
-            name: project_name,
+            name: toml_name,
             root,
             startup_window: Some(startup_window),
             startup_pane,
             windows,
         })?;
-        Ok(Snapshot { document, warnings })
+        Ok(Snapshot {
+            document,
+            warnings,
+            raw_session_name,
+            project_name,
+        })
+    }
+
+    fn list_sessions(&self) -> Result<Vec<String>> {
+        let output = self
+            .command()
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .output()
+            .context("cannot run tmux; install tmux before listing sessions")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if is_absent_server(&stderr) {
+                return Ok(Vec::new());
+            }
+            bail!("tmux failed: {}", stderr.trim());
+        }
+        let text = String::from_utf8(output.stdout).context("tmux returned non-UTF-8 output")?;
+        Ok(text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 
     fn snapshot_window(
@@ -483,7 +576,7 @@ fn snapshot_window_root(project_root: &str, window_root: &str) -> Option<String>
         )
 }
 
-fn normalize_project_name(name: &str) -> Result<String> {
+pub(crate) fn normalize_project_name(name: &str) -> Result<String> {
     let mut normalized = String::new();
     let mut replacing = false;
     for character in name.chars() {
@@ -502,6 +595,13 @@ fn normalize_project_name(name: &str) -> Result<String> {
     }
     validate_project_name(&normalized)?;
     Ok(normalized)
+}
+
+fn is_absent_server(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("no server running")
+        || stderr.contains("error connecting")
+        || stderr.contains("no such file or directory")
 }
 
 fn unique_window_name(name: &str, used: &mut HashSet<String>) -> String {
@@ -584,6 +684,17 @@ mod tests {
         assert_eq!(unique_window_name("shell", &mut used), "shell-2");
         assert_eq!(unique_window_name("shell-2", &mut used), "shell-2-2");
         assert_eq!(unique_window_name("", &mut used), "window");
+    }
+
+    #[test]
+    fn absent_tmux_server_is_an_empty_session_list() {
+        assert!(is_absent_server(
+            "error connecting to /tmp/tmux-1000/default (No such file or directory)"
+        ));
+        assert!(is_absent_server(
+            "no server running on /tmp/tmux-1000/default"
+        ));
+        assert!(!is_absent_server("lost server"));
     }
 
     #[test]

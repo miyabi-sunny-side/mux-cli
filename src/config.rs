@@ -73,6 +73,34 @@ impl ConfigDir {
         load_toml(&path)
     }
 
+    pub(crate) fn load_optional(&self, name: &str) -> Result<Option<ProjectDocument>> {
+        if validate_project_name(name).is_err() {
+            return Ok(None);
+        }
+        let path = self.path.join(format!("{name}.toml"));
+        if path.is_file() {
+            Ok(Some(load_toml(&path)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn find_saved(
+        &self,
+        project_name: &str,
+    ) -> Result<Option<(String, ProjectDocument)>> {
+        if let Some(document) = self.load_optional(project_name)? {
+            return Ok(Some((project_name.to_owned(), document)));
+        }
+        for stem in self.list()? {
+            let document = self.load(&stem)?;
+            if document.project.name == project_name {
+                return Ok(Some((stem, document)));
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn save(&self, name: &str, content: &[u8], force: bool) -> Result<()> {
         validate_project_name(name)?;
         fs::create_dir_all(&self.path)

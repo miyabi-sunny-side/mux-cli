@@ -699,6 +699,7 @@ dependencies = [
  "anyhow",
  "clap",
  "flate2",
+ "libc",
  "reqwest",
  "semver",
  "serde",
