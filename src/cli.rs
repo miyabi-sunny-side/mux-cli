@@ -1,7 +1,7 @@
 use std::{
-    io::Write,
+    io::{ErrorKind, Write},
     path::PathBuf,
-    process::{Command as ProcessCommand, Stdio},
+    process::{Child, Command as ProcessCommand, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
@@ -66,17 +66,26 @@ pub enum Command {
 }
 
 pub(crate) fn run_fzf(args: &[&str], lines: &[String]) -> Result<Option<String>> {
-    let mut child = ProcessCommand::new("fzf")
+    let child = ProcessCommand::new("fzf")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .context("fzf is required for interactive project selection")?;
+    finish_fzf(child, lines)
+}
+
+fn finish_fzf(mut child: Child, lines: &[String]) -> Result<Option<String>> {
     {
         let mut stdin = child.stdin.take().context("cannot open fzf stdin")?;
         for line in lines {
-            writeln!(stdin, "{line}")?;
+            if let Err(error) = writeln!(stdin, "{line}") {
+                if error.kind() == ErrorKind::BrokenPipe {
+                    break;
+                }
+                return Err(error.into());
+            }
         }
     }
     let output = child.wait_with_output().context("cannot wait for fzf")?;
@@ -111,6 +120,26 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn fzf_can_finish_before_reading_candidates() {
+        for (script, expected) in [("exit 130", None), ("printf 'demo\\n'", Some("demo\n"))] {
+            let mut child = ProcessCommand::new("/bin/sh")
+                .args(["-c", script])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            // Keep the write end open while the reader exits, making the race deterministic.
+            let stdin = child.stdin.take();
+            child.wait().unwrap();
+            child.stdin = stdin;
+            assert_eq!(
+                finish_fzf(child, &["demo".to_owned()]).unwrap().as_deref(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn launcher_overrides_accept_short_and_long_forms() {

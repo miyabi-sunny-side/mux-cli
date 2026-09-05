@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::Write,
+    io::{ErrorKind, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -17,13 +17,11 @@ fn mux(config: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
         command.stdin(Stdio::piped());
     }
     let mut child = command.spawn().unwrap();
-    if let Some(stdin) = stdin {
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(stdin.as_bytes())
-            .unwrap();
+    if let Some(stdin) = stdin
+        && let Err(error) = child.stdin.take().unwrap().write_all(stdin.as_bytes())
+    {
+        // A rejected command may exit before consuming stdin; inspect its output below.
+        assert_eq!(error.kind(), ErrorKind::BrokenPipe);
     }
     child.wait_with_output().unwrap()
 }
@@ -181,15 +179,15 @@ fn save_rejects_invalid_input_without_writing() {
             .success()
     );
     assert_eq!(fs::read(config.join("kept.toml")).unwrap(), b"original");
-    assert!(
-        !mux(
-            &config,
-            &["save", "../bad"],
-            Some(&project_toml(temp.path(), "bad"))
-        )
-        .status
-        .success()
+    // Exceed the pipe capacity so early name rejection also exercises a closed stdin.
+    let rejected = mux(
+        &config,
+        &["save", "../bad"],
+        Some(&"x".repeat(2 * 1024 * 1024)),
     );
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("project name must contain"));
+    assert!(!temp.path().join("bad.toml").exists());
 }
 
 #[test]
@@ -1035,7 +1033,12 @@ fn selector_alone_requires_fzf_and_cancellation_is_silent() {
         .env("PATH", &bin)
         .output()
         .unwrap();
-    assert_eq!(cancelled.status.code(), Some(130));
+    assert_eq!(
+        cancelled.status.code(),
+        Some(130),
+        "{}",
+        String::from_utf8_lossy(&cancelled.stderr)
+    );
     assert!(cancelled.stderr.is_empty());
 }
 
