@@ -33,9 +33,6 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
-      - name: Build release binary
-        run: cargo build --locked --release
-
       - name: Run real tmux integration test
         run: |
           cargo test --locked tmux::tests::real_tmux_session_is_built_without_user_configuration -- --ignored
