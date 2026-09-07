@@ -195,15 +195,31 @@ fn lint_warnings_do_not_block_save_but_make_lint_fail() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("config");
     let source = format!(
-        "name = \"warn\"\nroot = \"{}\"\n[[windows]]\nname = \"shell\"\npanes = [\"claude --resume\"]\n",
+        "name = \"warn\"\nroot = \"{}\"\n[[windows]]\nname = \"shell\"\npanes = [\"FOO=secret curl https://example.com\"]\n",
         temp.path().display()
     );
     let save = mux(&config, &["save", "warn"], Some(&source));
     assert!(save.status.success());
-    assert!(String::from_utf8_lossy(&save.stderr).contains("warning:"));
+    let messages = [
+        "window 'shell' pane 1 command 'FOO=secret' is not allowlisted",
+        "window 'shell' pane 1 command has arguments",
+        "window 'shell' pane 1 command looks like it contains a hostname or URL",
+        "window 'shell' pane 1 command looks like it assigns or expands an environment variable",
+    ];
+    assert_eq!(
+        String::from_utf8(save.stderr).unwrap(),
+        messages
+            .map(|message| format!("warning: {message}\n"))
+            .concat()
+    );
     let lint = mux(&config, &["lint", "warn"], None);
     assert_eq!(lint.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&lint.stderr).contains("has arguments"));
+    assert_eq!(
+        String::from_utf8(lint.stderr).unwrap(),
+        messages
+            .map(|message| format!("warn: warning: {message}\n"))
+            .concat()
+    );
     assert_eq!(mux(&config, &["lint"], None).status.code(), Some(1));
 }
 

@@ -8,31 +8,15 @@ pub(crate) fn is_allowed_command(command: &str) -> bool {
     ALLOWED_COMMANDS.contains(&command)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Warning {
-    message: String,
-}
-
-impl std::fmt::Display for Warning {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
 #[must_use]
-pub(crate) fn lint_project(document: &ProjectDocument) -> Vec<Warning> {
+pub(crate) fn lint_project(document: &ProjectDocument) -> Vec<String> {
     let mut warnings = Vec::new();
     let project_root = expand_home(&document.project.root);
     lint_path("project", &project_root, &mut warnings);
     for window in &document.project.windows {
         let name = &window.name;
         if let Some(root) = &window.root {
-            let root = PathBuf::from(root);
-            let root = if root.is_absolute() {
-                root
-            } else {
-                resolve_window_root(&project_root, Some(root.to_string_lossy().as_ref()))
-            };
+            let root = resolve_window_root(&project_root, Some(root));
             lint_path(&format!("window '{name}'"), &root, &mut warnings);
         }
         for (index, command) in window.panes.iter().enumerate() {
@@ -42,12 +26,12 @@ pub(crate) fn lint_project(document: &ProjectDocument) -> Vec<Warning> {
     warnings
 }
 
-fn lint_path(owner: &str, path: &std::path::Path, warnings: &mut Vec<Warning>) {
+fn lint_path(owner: &str, path: &std::path::Path, warnings: &mut Vec<String>) {
     if !path.is_dir() {
-        warnings.push(warning(format!(
+        warnings.push(format!(
             "{owner} root '{}' is not an existing directory",
             path.display()
-        )));
+        ));
     }
 }
 
@@ -63,31 +47,31 @@ fn expand_home(root: &str) -> PathBuf {
     PathBuf::from(root)
 }
 
-fn lint_command(window: &str, pane: usize, command: &str, warnings: &mut Vec<Warning>) {
+fn lint_command(window: &str, pane: usize, command: &str, warnings: &mut Vec<String>) {
     if command.is_empty() {
         return;
     }
     let words: Vec<_> = command.split_whitespace().collect();
     let executable = words.first().copied().unwrap_or_default();
     if !is_allowed_command(executable) {
-        warnings.push(warning(format!(
+        warnings.push(format!(
             "window '{window}' pane {pane} command '{executable}' is not allowlisted"
-        )));
+        ));
     }
     if words.len() > 1 {
-        warnings.push(warning(format!(
+        warnings.push(format!(
             "window '{window}' pane {pane} command has arguments"
-        )));
+        ));
     }
     if command.contains("://") || words.iter().any(|word| looks_like_host(word)) {
-        warnings.push(warning(format!(
+        warnings.push(format!(
             "window '{window}' pane {pane} command looks like it contains a hostname or URL"
-        )));
+        ));
     }
     if words.iter().any(|word| looks_like_assignment(word)) || command.contains("${") {
-        warnings.push(warning(format!(
+        warnings.push(format!(
             "window '{window}' pane {pane} command looks like it assigns or expands an environment variable"
-        )));
+        ));
     }
 }
 
@@ -114,10 +98,6 @@ fn looks_like_assignment(word: &str) -> bool {
         })
 }
 
-fn warning(message: String) -> Warning {
-    Warning { message }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -137,11 +117,7 @@ panes = ["claude --resume", "curl https://example.com", "FOO=secret nvim"]
 "#,
         )
         .unwrap();
-        let text = lint_project(&document)
-            .into_iter()
-            .map(|item| item.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = lint_project(&document).join("\n");
         assert!(text.contains("has arguments"));
         assert!(text.contains("not allowlisted"));
         assert!(text.contains("hostname or URL"));
@@ -155,11 +131,7 @@ panes = ["claude --resume", "curl https://example.com", "FOO=secret nvim"]
         )
         .unwrap();
         let warnings = lint_project(&document);
-        assert!(
-            warnings
-                .iter()
-                .any(|item| item.to_string().contains("not an existing"))
-        );
+        assert!(warnings.iter().any(|item| item.contains("not an existing")));
     }
 
     #[test]
@@ -175,6 +147,6 @@ panes = ["claude --resume", "curl https://example.com", "FOO=secret nvim"]
 
         let missing = source.replace("root = \"src\"", "root = \"missing\"");
         let warnings = lint_project(&ProjectDocument::parse(&missing).unwrap());
-        assert!(warnings[0].to_string().contains("missing"));
+        assert!(warnings[0].contains("missing"));
     }
 }
