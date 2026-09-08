@@ -16,8 +16,7 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 use tempfile::{NamedTempFile, TempDir};
 
-const REPOSITORY: &str = "miyabisun/mux";
-const RELEASE_API: &str = "https://api.github.com/repos/miyabisun/mux/releases/latest";
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_CHECKSUM_BYTES: u64 = 4096;
 const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
@@ -110,8 +109,12 @@ fn update_target() -> Result<PathBuf> {
 
 fn fetch_latest(downloader: &impl Downloader, workspace: &TempDir) -> Result<Version> {
     let metadata_path = workspace.path().join("latest.json");
+    let repository = REPOSITORY
+        .strip_prefix("https://github.com/")
+        .context("package repository must be a GitHub HTTPS URL")?;
+    let release_api = format!("https://api.github.com/repos/{repository}/releases/latest");
     downloader
-        .download(RELEASE_API, &metadata_path, MAX_METADATA_BYTES)
+        .download(&release_api, &metadata_path, MAX_METADATA_BYTES)
         .context("GitHub latest release lookup failed")?;
     let release: LatestRelease = serde_json::from_reader(File::open(metadata_path)?)
         .context("GitHub latest release response is invalid")?;
@@ -150,7 +153,7 @@ fn download_and_verify(
     version: &Version,
     asset: &str,
 ) -> Result<PathBuf> {
-    let base = format!("https://github.com/{REPOSITORY}/releases/download/v{version}");
+    let base = format!("{REPOSITORY}/releases/download/v{version}");
     let archive_path = workspace.path().join(asset);
     let checksum_path = workspace.path().join(format!("{asset}.sha256"));
     downloader.download(&format!("{base}/{asset}"), &archive_path, MAX_ARCHIVE_BYTES)?;
@@ -393,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn release_archive_accepts_mux_and_license() {
+    fn canonical_release_source_downloads_and_verifies_mux_and_license() {
         let workspace = tempfile::tempdir().unwrap();
         let archive_path = workspace.path().join("release.tar.gz");
         let file = File::create(&archive_path).unwrap();
@@ -413,8 +416,30 @@ mod tests {
         }
         builder.into_inner().unwrap().finish().unwrap();
 
-        let extracted = extract_binary(&archive_path, workspace.path()).unwrap();
+        let archive = fs::read(&archive_path).unwrap();
+        let asset = "mux-linux-x86_64.tar.gz";
+        let base = "https://github.com/miyabi-sunny-side/mux-cli/releases/download/v1.2.3";
+        let downloader = FakeDownloader {
+            files: BTreeMap::from([
+                (
+                    "https://api.github.com/repos/miyabi-sunny-side/mux-cli/releases/latest".into(),
+                    br#"{"tag_name":"v1.2.3"}"#.to_vec(),
+                ),
+                (
+                    format!("{base}/{asset}.sha256"),
+                    format!("{:x}  {asset}\n", Sha256::digest(&archive)).into_bytes(),
+                ),
+                (format!("{base}/{asset}"), archive),
+            ]),
+        };
+        let remote = fetch_latest(&downloader, &workspace).unwrap();
+        assert_eq!(remote, Version::new(1, 2, 3));
+        let extracted = download_and_verify(&downloader, &workspace, &remote, asset).unwrap();
         assert_eq!(fs::read(extracted).unwrap(), b"binary");
+        assert_eq!(
+            env!("CARGO_PKG_REPOSITORY"),
+            "https://github.com/miyabi-sunny-side/mux-cli"
+        );
     }
 
     #[test]
