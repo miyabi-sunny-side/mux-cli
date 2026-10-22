@@ -16,14 +16,22 @@ fn mux(config: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
     if stdin.is_some() {
         command.stdin(Stdio::piped());
     }
-    let mut child = command.spawn().unwrap();
+    let mut child = command.spawn().expect("spawn mux binary");
     if let Some(stdin) = stdin
-        && let Err(error) = child.stdin.take().unwrap().write_all(stdin.as_bytes())
+        && let Err(error) = child
+            .stdin
+            .take()
+            .expect("stdin was piped")
+            .write_all(stdin.as_bytes())
     {
         // A rejected command may exit before consuming stdin; inspect its output below.
-        assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+        assert_eq!(
+            error.kind(),
+            ErrorKind::BrokenPipe,
+            "only an early exit may reject stdin"
+        );
     }
-    child.wait_with_output().unwrap()
+    child.wait_with_output().expect("wait for mux")
 }
 
 fn project_toml(root: &Path, name: &str) -> String {
@@ -34,7 +42,7 @@ fn project_toml(root: &Path, name: &str) -> String {
 }
 
 fn install_snapshot_tmux(bin: &Path) {
-    fs::create_dir(bin).unwrap();
+    fs::create_dir(bin).expect("create fake bin directory");
     let tmux = bin.join("tmux");
     fs::write(
         &tmux,
@@ -67,19 +75,20 @@ case "$*" in
 esac
 "#,
     )
-    .unwrap();
-    fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
+    .expect("write fake tmux");
+    fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755))
+        .expect("make fake tmux executable");
 }
 
 fn install_launcher_commands(bin: &Path) {
-    fs::create_dir(bin).unwrap();
+    fs::create_dir(bin).expect("create fake bin directory");
     let fzf = bin.join("fzf");
     fs::write(
         &fzf,
         "#!/bin/sh\nwhile IFS= read -r _line; do :; done\nprintf 'demo\\n'\n",
     )
-    .unwrap();
-    fs::set_permissions(&fzf, fs::Permissions::from_mode(0o755)).unwrap();
+    .expect("write fake fzf");
+    fs::set_permissions(&fzf, fs::Permissions::from_mode(0o755)).expect("make fake fzf executable");
 
     let tmux = bin.join("tmux");
     fs::write(
@@ -102,8 +111,9 @@ esac
 exit 0
 "#,
     )
-    .unwrap();
-    fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
+    .expect("write fake tmux");
+    fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755))
+        .expect("make fake tmux executable");
 }
 
 fn fake_snapshot(bin: &Path, config: &Path, roots: [&Path; 3], fail: bool) -> Output {
@@ -120,7 +130,7 @@ fn fake_snapshot(bin: &Path, config: &Path, roots: [&Path; 3], fail: bool) -> Ou
     if fail {
         command.env("MUX_TEST_FAIL", "1");
     }
-    command.output().unwrap()
+    command.output().expect("run mux snapshot")
 }
 
 #[test]
@@ -452,11 +462,12 @@ fn toml_is_loaded_and_force_overwritten_in_place() {
 }
 
 fn install_lifecycle_commands(bin: &Path, fzf: Option<&str>) {
-    fs::create_dir(bin).unwrap();
+    fs::create_dir(bin).expect("create fake bin directory");
     if let Some(script) = fzf {
         let path = bin.join("fzf");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&path, script).expect("write fake fzf");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("make fake fzf executable");
     }
 
     let tmux = bin.join("tmux");
@@ -514,8 +525,9 @@ esac
 exit 0
 "#,
     )
-    .unwrap();
-    fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
+    .expect("write fake tmux");
+    fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755))
+        .expect("make fake tmux executable");
 }
 
 fn lifecycle_mux(
@@ -543,16 +555,16 @@ fn lifecycle_mux(
     if stdin.is_some() {
         command.stdin(Stdio::piped());
     }
-    let mut child = command.spawn().unwrap();
+    let mut child = command.spawn().expect("spawn mux binary");
     if let Some(stdin) = stdin {
         child
             .stdin
             .take()
-            .unwrap()
+            .expect("stdin was piped")
             .write_all(stdin.as_bytes())
-            .unwrap();
+            .expect("write stdin to mux");
     }
-    child.wait_with_output().unwrap()
+    child.wait_with_output().expect("wait for mux")
 }
 
 fn prepend_path(bin: &Path) -> PathBuf {
@@ -560,7 +572,7 @@ fn prepend_path(bin: &Path) -> PathBuf {
         std::iter::once(bin.to_path_buf())
             .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
     )
-    .unwrap()
+    .expect("PATH entries contain no separator")
     .into()
 }
 
@@ -568,9 +580,9 @@ fn lifecycle_roots(temp: &Path) -> (std::path::PathBuf, std::path::PathBuf, std:
     let root = temp.join("root");
     let other = root.join("other");
     let different = temp.join("different");
-    fs::create_dir(&root).unwrap();
-    fs::create_dir(&other).unwrap();
-    fs::create_dir(&different).unwrap();
+    fs::create_dir(&root).expect("create root directory");
+    fs::create_dir(&other).expect("create nested root directory");
+    fs::create_dir(&different).expect("create different directory");
     (root, other, different)
 }
 

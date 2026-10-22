@@ -526,6 +526,8 @@ impl Drop for ImmediateInput {
     fn drop(&mut self) {
         if !self.restored {
             // Best effort on early returns. The explicit path reports errors.
+            // SAFETY: the guard is dropped inside `read_choice` before the input
+            // handle, so `fd` is live and `original` holds the captured settings.
             unsafe {
                 libc::tcsetattr(self.fd, libc::TCSANOW, std::ptr::from_ref(&self.original));
             }

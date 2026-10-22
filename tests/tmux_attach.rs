@@ -70,13 +70,13 @@ fn attach_inherits_a_real_pseudo_terminal() {
 }
 
 fn find_executable(name: &str) -> PathBuf {
-    env::split_paths(&env::var_os("PATH").unwrap())
+    env::split_paths(&env::var_os("PATH").expect("PATH is set"))
         .map(|directory| directory.join(name))
         .find(|path| path.is_file())
         .unwrap_or_else(|| panic!("{name} is not installed"))
 }
 
 fn write_executable(path: &Path, content: &str) {
-    fs::write(path, content).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(path, content).expect("write executable");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make file executable");
 }
