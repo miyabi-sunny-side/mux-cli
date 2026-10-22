@@ -91,9 +91,12 @@ For development, clone the repository and run:
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --locked
+cargo test --locked tmux::tests::real_tmux_session_is_built_without_user_configuration -- --ignored
+cargo test --locked --test tmux_attach -- --ignored
+cargo test --locked --test snapshot_tmux -- --ignored
 ```
 
-See [CI](.github/workflows/ci.yml) for additional tmux integration tests.
+The `--ignored` tests drive a real `tmux`, so install it first.
 See the [release workflow](.github/workflows/release.yml) for packaging.
 
 Licensed under [MIT](LICENSE).

@@ -2,13 +2,8 @@ use std::{fs, path::Path};
 
 #[test]
 fn github_workflows_are_valid_yaml() {
-    for path in [
-        Path::new(".github/workflows/ci.yml"),
-        Path::new(".github/workflows/release.yml"),
-    ] {
-        let source = fs::read_to_string(path).unwrap();
-        serde_yaml::from_str::<serde_yaml::Value>(&source).unwrap();
-    }
+    let source = fs::read_to_string(".github/workflows/release.yml").unwrap();
+    serde_yaml::from_str::<serde_yaml::Value>(&source).unwrap();
 }
 
 #[test]
@@ -29,24 +24,20 @@ fn release_workflow_publishes_the_contract_assets() {
 
 #[test]
 fn third_party_actions_are_pinned_to_full_commit_shas() {
-    for path in [
-        Path::new(".github/workflows/ci.yml"),
-        Path::new(".github/workflows/release.yml"),
-    ] {
-        let source = fs::read_to_string(path).unwrap();
-        for line in source.lines() {
-            let Some(action) = line.trim().strip_prefix("- uses: ") else {
-                continue;
-            };
-            let action = action.split_whitespace().next().unwrap();
-            let (_, reference) = action.split_once('@').unwrap();
-            assert_eq!(reference.len(), 40, "{action} in {}", path.display());
-            assert!(
-                reference.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                "{action} in {}",
-                path.display()
-            );
-        }
+    let path = Path::new(".github/workflows/release.yml");
+    let source = fs::read_to_string(path).unwrap();
+    for line in source.lines() {
+        let Some(action) = line.trim().strip_prefix("- uses: ") else {
+            continue;
+        };
+        let action = action.split_whitespace().next().unwrap();
+        let (_, reference) = action.split_once('@').unwrap();
+        assert_eq!(reference.len(), 40, "{action} in {}", path.display());
+        assert!(
+            reference.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{action} in {}",
+            path.display()
+        );
     }
 }
 
