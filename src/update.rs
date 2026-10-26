@@ -11,24 +11,18 @@ use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use semver::Version;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tar::Archive;
 use tempfile::{NamedTempFile, TempDir};
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
-const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_CHECKSUM_BYTES: u64 = 4096;
 const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Debug, Deserialize)]
-struct LatestRelease {
-    tag_name: String,
-}
-
 trait Downloader {
     fn download(&self, url: &str, destination: &Path, maximum_bytes: u64) -> Result<()>;
+    fn resolve(&self, url: &str) -> Result<String>;
 }
 
 struct HttpsDownloader {
@@ -69,6 +63,16 @@ impl Downloader for HttpsDownloader {
         output.sync_all()?;
         Ok(())
     }
+
+    fn resolve(&self, url: &str) -> Result<String> {
+        let response = self
+            .client
+            .head(url)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .with_context(|| format!("HTTPS request failed for {url}"))?;
+        Ok(response.url().to_string())
+    }
 }
 
 pub(crate) fn run() -> Result<std::process::ExitCode> {
@@ -77,7 +81,7 @@ pub(crate) fn run() -> Result<std::process::ExitCode> {
         .context("local package version is not valid semver")?;
     let workspace = tempfile::tempdir()?;
     let downloader = HttpsDownloader::new()?;
-    let remote = fetch_latest(&downloader, &workspace)?;
+    let remote = fetch_latest(&downloader)?;
     if !update_required(&current, &remote) {
         println!("mux: up to date (local {current}, latest {remote}); binary unchanged");
         return Ok(std::process::ExitCode::SUCCESS);
@@ -107,18 +111,26 @@ fn update_target() -> Result<PathBuf> {
     Ok(target)
 }
 
-fn fetch_latest(downloader: &impl Downloader, workspace: &TempDir) -> Result<Version> {
-    let metadata_path = workspace.path().join("latest.json");
-    let repository = REPOSITORY
-        .strip_prefix("https://github.com/")
-        .context("package repository must be a GitHub HTTPS URL")?;
-    let release_api = format!("https://api.github.com/repos/{repository}/releases/latest");
-    downloader
-        .download(&release_api, &metadata_path, MAX_METADATA_BYTES)
+fn fetch_latest(downloader: &impl Downloader) -> Result<Version> {
+    let redirect = downloader
+        .resolve(&format!("{REPOSITORY}/releases/latest"))
         .context("GitHub latest release lookup failed")?;
-    let release: LatestRelease = serde_json::from_reader(File::open(metadata_path)?)
-        .context("GitHub latest release response is invalid")?;
-    parse_release_tag(&release.tag_name)
+    parse_latest_redirect(&redirect)
+}
+
+fn parse_latest_redirect(url: &str) -> Result<Version> {
+    let segments: Vec<&str> = url
+        .strip_prefix("https://github.com/")
+        .context("latest release redirect is not a GitHub HTTPS URL")?
+        .split('/')
+        .collect();
+    let [owner, repository, "releases", "tag", tag] = segments.as_slice() else {
+        bail!("latest release redirect has no release tag: {url}");
+    };
+    if owner.is_empty() || repository.is_empty() {
+        bail!("latest release redirect has no release tag: {url}");
+    }
+    parse_release_tag(tag)
 }
 
 fn parse_release_tag(tag: &str) -> Result<Version> {
@@ -284,22 +296,61 @@ fn atomic_replace(target: &Path, source: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, io::Cursor};
+    use std::{cell::RefCell, collections::BTreeMap, io::Cursor};
 
     use super::*;
 
+    #[derive(Default)]
     struct FakeDownloader {
         files: BTreeMap<String, Vec<u8>>,
+        redirects: BTreeMap<String, String>,
+        requested: RefCell<Vec<String>>,
     }
 
     impl Downloader for FakeDownloader {
         fn download(&self, url: &str, destination: &Path, maximum_bytes: u64) -> Result<()> {
+            self.requested.borrow_mut().push(url.to_owned());
             let body = self.files.get(url).context("injected download failure")?;
             if body.len() as u64 > maximum_bytes {
                 bail!("injected download exceeds limit");
             }
             fs::write(destination, body)?;
             Ok(())
+        }
+
+        fn resolve(&self, url: &str) -> Result<String> {
+            self.requested.borrow_mut().push(url.to_owned());
+            self.redirects
+                .get(url)
+                .cloned()
+                .context("injected redirect failure")
+        }
+    }
+
+    #[test]
+    fn latest_tag_is_read_from_the_release_redirect() {
+        assert_eq!(
+            parse_latest_redirect("https://github.com/owner/repo/releases/tag/v1.2.3").unwrap(),
+            Version::new(1, 2, 3)
+        );
+        for invalid in [
+            "https://github.com/owner/repo/releases",
+            "https://github.com/owner/repo/releases/latest",
+            "https://github.com/owner/repo/releases/tag/",
+            "https://github.com/owner/repo/releases/tag/v1.2.3/extra",
+            "https://example.com/owner/repo/releases/tag/v1.2.3",
+            "http://github.com/owner/repo/releases/tag/v1.2.3",
+        ] {
+            assert!(parse_latest_redirect(invalid).is_err(), "{invalid}");
+        }
+        for invalid in ["latest", "1.2.3", "v1.2", "v1.2.3-dev"] {
+            assert!(
+                parse_latest_redirect(&format!(
+                    "https://github.com/owner/repo/releases/tag/{invalid}"
+                ))
+                .is_err(),
+                "{invalid}"
+            );
         }
     }
 
@@ -340,14 +391,7 @@ mod tests {
 
     #[test]
     fn download_failure_is_contextualized() {
-        let workspace = tempfile::tempdir().unwrap();
-        let error = fetch_latest(
-            &FakeDownloader {
-                files: BTreeMap::new(),
-            },
-            &workspace,
-        )
-        .unwrap_err();
+        let error = fetch_latest(&FakeDownloader::default()).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -420,22 +464,30 @@ mod tests {
         let asset = "mux-linux-x86_64.tar.gz";
         let base = "https://github.com/miyabi-sunny-side/mux-cli/releases/download/v1.2.3";
         let downloader = FakeDownloader {
+            redirects: BTreeMap::from([(
+                "https://github.com/miyabi-sunny-side/mux-cli/releases/latest".into(),
+                "https://github.com/miyabi-sunny-side/mux-cli/releases/tag/v1.2.3".into(),
+            )]),
             files: BTreeMap::from([
-                (
-                    "https://api.github.com/repos/miyabi-sunny-side/mux-cli/releases/latest".into(),
-                    br#"{"tag_name":"v1.2.3"}"#.to_vec(),
-                ),
                 (
                     format!("{base}/{asset}.sha256"),
                     format!("{:x}  {asset}\n", Sha256::digest(&archive)).into_bytes(),
                 ),
                 (format!("{base}/{asset}"), archive),
             ]),
+            ..FakeDownloader::default()
         };
-        let remote = fetch_latest(&downloader, &workspace).unwrap();
+        let remote = fetch_latest(&downloader).unwrap();
         assert_eq!(remote, Version::new(1, 2, 3));
         let extracted = download_and_verify(&downloader, &workspace, &remote, asset).unwrap();
         assert_eq!(fs::read(extracted).unwrap(), b"binary");
+        let requested = downloader.requested.borrow();
+        assert!(
+            requested
+                .iter()
+                .all(|url| url.starts_with("https://github.com/")),
+            "update must not call the GitHub API: {requested:?}"
+        );
         assert_eq!(
             env!("CARGO_PKG_REPOSITORY"),
             "https://github.com/miyabi-sunny-side/mux-cli"
